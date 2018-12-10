@@ -1,0 +1,21 @@
+---
+- hosts: localhost
+  tasks:
+    - name: load config file
+      include_vars:
+        file: "{{ config_file }}"
+        name: config
+    - name: create stack
+      cloudformation:
+        stack_name: "{{ ((config_file | basename ) | splitext)[0] }}"
+        state: "present"
+        region: "ap-southeast-2"
+        template: "cloudformation.yaml"
+        template_parameters: '{{ config.Parameters }}'
+        tags: '{{ config.Tags }}'
+        validate_certs: no
+#    TODO:
+#    - name: create or update dns
+#        shell: Route53toELB.sh "{{ ((config_file | basename ) | splitext)[0] }}" "{{ config.Parameters.HostDnsSuffix }}" "{{ config.Parameters.ZoneId }}" "{{ config.Parameters.Route53Profile }}" >> Route53toELB.log
+#        args:
+#          chdir: scripts/
