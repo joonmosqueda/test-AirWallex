@@ -1,21 +1,178 @@
----
-- hosts: localhost
+# Launch instances, runs some tasks
+# and then terminate them
+
+- name: TEST AIRWALLEX
+  hosts: localhost
+  gather_facts: False
+  vars:
+    keypair: my_keypair
+    instance_type: t2.micro
+    security_group: my_securitygroup
+    image: ami-09b42976632b27e9b
+    region: ap-southeast-2
+    aws_profile: iam-instance-profile
+    vpc_id: vpc-xxxxxxxx
   tasks:
-    - name: load config file
-      include_vars:
-        file: "{{ config_file }}"
-        name: config
-    - name: create stack
-      cloudformation:
-        stack_name: "{{ ((config_file | basename ) | splitext)[0] }}"
-        state: "present"
-        region: "ap-southeast-2"
-        template: "cloudformation.yaml"
-        template_parameters: '{{ config.Parameters }}'
-        tags: '{{ config.Tags }}'
-        validate_certs: no
-#    TODO:
-#    - name: create or update dns
-#        shell: Route53toELB.sh "{{ ((config_file | basename ) | splitext)[0] }}" "{{ config.Parameters.HostDnsSuffix }}" "{{ config.Parameters.ZoneId }}" "{{ config.Parameters.Route53Profile }}" >> Route53toELB.log
-#        args:
-#          chdir: scripts/
+    - name: configure security_group
+      ec2_group:
+        name: "{{ security_group }}"
+        description: sg for web server
+        vpc_id: "{{ vpc_id }}"
+        profile: "{{ aws_profile }}"
+        region: "{{ region }}"
+        rules:
+          - proto: tcp
+            ports:
+              - 8080
+            cidr_ip: 10.0.0.0/8
+            rule_desc: allow internal network on port 8080
+  
+    - name: Launch instance
+      ec2:
+         key_name: "{{ keypair }}"
+         group: "{{ security_group }}"
+         instance_type: "{{ instance_type }}"
+         image: "{{ image }}"
+         wait: true
+         region: "{{ region }}"
+         vpc_subnet_id: subnet-29e63245
+         assign_public_ip: yes
+      register: ec2
+
+    - name: Add new instance to host group
+      add_host:
+        hostname: "{{ item.public_ip }}"
+        groupname: launched
+      with_items: "{{ ec2.instances }}"
+
+    - name: Wait for SSH to come up
+      delegate_to: "{{ item.public_dns_name }}"
+      wait_for_connection:
+        delay: 60
+        timeout: 320
+      with_items: "{{ ec2.instances }}"
+
+- name: Configure firewalld on instance(s)
+  hosts: launched
+  connection: local
+  tasks:
+    - name: configure firewalld
+      firewalld:
+        zone: dmz
+        service: http
+        permanent: true
+        state: enabled
+
+- name: Install docker on instance(s)
+  gather_facts: No
+  hosts: launched
+
+  tasks:
+    - name: Install yum utils
+      yum:
+        name: yum-utils
+        state: latest
+
+    - name: Install device-mapper-persistent-data
+      yum:
+        name: device-mapper-persistent-data
+        state: latest
+
+    - name: Install lvm2
+      yum:
+        name: lvm2
+        state: latest
+
+    - name: Add Docker repo
+      get_url:
+        url: https://download.docker.com/linux/centos/docker-ce.repo
+        dest: /etc/yum.repos.d/docer-ce.repo
+      become: yes
+
+    - name: Enable Docker Edge repo
+      ini_file:
+        dest: /etc/yum.repos.d/docer-ce.repo
+        section: 'docker-ce-edge'
+        option: enabled
+        value: 0
+      become: yes
+
+    - name: Enable Docker Test repo
+      ini_file:
+        dest: /etc/yum.repos.d/docer-ce.repo
+        section: 'docker-ce-test'
+        option: enabled
+        value: 0
+      become: yes
+
+    - name: Install Docker
+      package:
+        name: docker-ce
+        state: latest
+      become: yes
+
+    - name: Start Docker service
+      service:
+        name: docker
+        state: started
+        enabled: yes
+      become: yes
+
+    - name: Add user vagrant to docker group
+      user:
+        name: vagrant
+        groups: docker
+        append: yes
+        become: yes
+
+- name: Run nginx docker on instance(s)
+  hosts: launched
+  connection: local
+  tasks:
+    - name: nginx container
+      docker_container:
+        name: nginx
+        image: nginx
+        state: started
+        ports:
+          - 8080:8080
+        exposed_ports:
+          - 8080
+
+- name: get container status
+  hosts: launched
+  shell: docker ps -a -f name=nginx --format {%raw%}"table {{.Status}}"{%endraw%} | awk 'FNR == 2 {print}' | awk '{print $1}'
+  register: status
+
+- name: download default page
+  hosts: launched
+  get_url:
+    url: http://localhost:8080/
+    dest: /tmp/foo.html
+    mode: 0440  
+
+- name: print out word that occurs the most
+  hosts: launched
+  tasks:
+    - name: count unique words
+      shell: /usr/bin/cat /tmp/foo.html | tr -s ' ' '\n' | sort | uniq -c | sort -r | awk '{ print $2, $1 }' | head -1
+      register: result
+
+    - name: print result
+      debug:
+        var: result
+        verbosity: 2
+        msg:
+          - "Word and count '{{ result }}'"
+
+- name: install cron job (nginx docker stats)
+  cron: user="ansible" name="nginx docker stats" minute="*" job="for i in 1..6; do; docker stats nginx >> /tmp/nginx_stats.log; sleep 10; done > /dev/null"      
+  
+- name: Terminate instances
+  hosts: localhost
+  connection: local
+  tasks:
+    - name: Terminate instances that were previously launched
+      ec2:
+        state: 'absent'
+        instance_ids: '{{ ec2.instance_ids }}'
