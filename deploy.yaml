@@ -5,13 +5,13 @@
   hosts: localhost
   gather_facts: False
   vars:
-    keypair: my_keypair
+    keypair: "mjoonjoel_20181126"
     instance_type: t2.micro
     security_group: my_securitygroup
-    image: ami-09b42976632b27e9b
+    image: ami-08589eca6dcc9b39c
     region: ap-southeast-2
-    aws_profile: iam-instance-profile
-    vpc_id: vpc-xxxxxxxx
+    aws_profile: "mjoonjoel_InstanceRole"
+    vpc_id: "vpc-82f789e5"
   tasks:
     - name: configure security_group
       ec2_group:
